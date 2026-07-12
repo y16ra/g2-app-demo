@@ -42,10 +42,12 @@ if (result !== 0) {
 // Single event subscription - all OS events arrive through onEvenHubEvent.
 // Inspect event.textEvent / event.listEvent / event.sysEvent to route by source.
 //
-// On the root/start-up page, taps on the full-screen container arrive as
-// `sysEvent` (no containerID) rather than `textEvent` - confirmed against
-// evenhub-simulator v0.7.1 via its automation console log, which never
-// emitted a textEvent for click/double_click on this page.
+// On the root/start-up page, click/double-click on the full-screen container
+// arrive as `sysEvent` (no containerID) rather than `textEvent` - confirmed
+// on both evenhub-simulator v0.7.1 and real G2 hardware. Swipe (scroll)
+// gestures, by contrast, DO arrive as `textEvent` with containerID set.
+// So pick whichever payload is present and only apply the containerID
+// filter when textEvent is the source.
 let count = 0
 
 bridge.onEvenHubEvent((event) => {
