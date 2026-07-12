@@ -35,8 +35,8 @@ const result = await bridge.createStartUpPageContainer(
 )
 
 if (result !== 0) {
-  console.error('createStartUpPageContainer failed:', result)
   // 1 = invalid params, 2 = oversize, 3 = out of memory
+  throw new Error(`createStartUpPageContainer failed with code ${result}`)
 }
 
 // Single event subscription - all OS events arrive through onEvenHubEvent.
