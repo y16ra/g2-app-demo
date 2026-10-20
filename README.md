@@ -33,7 +33,7 @@ evenhub-simulator -g http://localhost:5173
 - シングルタップ、または上スワイプ（`OsEventTypeList.SCROLL_TOP_EVENT`）で +1。
 - 下スワイプ（`OsEventTypeList.SCROLL_BOTTOM_EVENT`）で −1。回数のカウンタなので 0 より小さくしない。下スワイプは 1 戻す操作。
 - ダブルタップで終了確認ダイアログ（従来どおり）。
-- 値は SDK の `bridge.getLocalStorage` / `bridge.setLocalStorage` を優先して保存する（追加の permission は不要）。これは Even Hub の端末側キーバリュー。ブリッジが無い・失敗した・値が無いときは `window.localStorage` にミラーしたコピーへフォールバックする。両方使えないときは 0 から始まり、その起動中の表示更新は続ける。二つの保存先が食い違ったときは、更新のたびに増やす revision が大きい方を採用する。`evenhub-simulator` 0.9.5 ではブリッジ側はプロセスが生きている間だけ残り、プロセスを落として開き直した場合は localStorage 側から復帰する。
+- 値は SDK の `bridge.getLocalStorage` / `bridge.setLocalStorage` に保存する（追加の permission は不要）。同じ整数を `window.localStorage` にもミラーする。ブリッジの読み取りが成功したときだけブリッジへ書く。失敗やタイムアウトはキーが空なのとは別で、その場合は localStorage で再開し、ブリッジには書かない。書き込みにタイムアウトは掛けず、進行中は1件だけにして、待ちの間に変わったカウントは最後の値だけ送る。シミュレータ 0.9.5 ではブリッジの値はプロセスが生きている間だけ残り、プロセスを落として開き直すとキーは空なので localStorage から復帰する。
 
 SDK 0.0.12 の `OsEventTypeList` では `SCROLL_TOP_EVENT = 1`、`SCROLL_BOTTOM_EVENT = 2`。実機ログの上スワイプ `eventType: 1` / 下スワイプ `eventType: 2`（`textEvent`、`containerID: 1`）と一致する。数値はコードに直書きせず、この定数で判定している。
 

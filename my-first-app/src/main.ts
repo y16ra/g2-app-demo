@@ -6,25 +6,24 @@ import {
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 
-// Prefer the SDK phone-side store (setLocalStorage / getLocalStorage).
-// Mirror every write to window.localStorage so a host with no bridge, or an
-// empty bridge value, can still resume. The higher revision wins if the two
-// copies diverge. Simulator 0.9.5 keeps the bridge value for the process
-// only; a full restart comes back from localStorage.
-const COUNT_STORAGE_KEY = 'count'
-const STORAGE_TIMEOUT_MS = 1500
+// Bridge local storage is the source of truth after a read succeeds.
+// A timeout or rejection is not an empty key: resume from localStorage and
+// do not write the bridge, so an unread value cannot be overwritten.
+// Writes are not timed out. One write is in flight; a newer count replaces
+// anything still queued, so a slow write cannot land after a newer one.
+const COUNT_KEY = 'count'
+const BRIDGE_READ_TIMEOUT_MS = 1500
 
-type StoredCount = {
-  count: number
-  revision: number
-}
+type BridgeRead =
+  | { ok: true; count: number | null }
+  | { ok: false }
 
 const bridge = await waitForEvenAppBridge()
 
 let count = 0
-let revision = 0
-const warned = new Set<string>()
-let bridgeWriteChain: Promise<void> = Promise.resolve()
+let bridgeReady = false
+let pendingBridgeCount: number | null = null
+let bridgeWrite: Promise<void> = Promise.resolve()
 
 await restoreCount()
 
@@ -82,8 +81,7 @@ function applyDelta(delta: 1 | -1, gesture: 'tap' | 'swipe-up' | 'swipe-down'): 
   }
 
   count = next
-  revision += 1
-  saveCount({ count, revision })
+  saveCount(count)
   renderCount()
   console.log(`[g2demo] count=${count} after ${gesture}`)
 }
@@ -94,7 +92,7 @@ function renderCount(): void {
     containerName: 'main',
     content: contentFor(count),
   })).catch((error: unknown) => {
-    warnOnce('render', '[g2demo] text update failed', error)
+    console.warn('[g2demo] text update failed', error)
   })
 }
 
@@ -135,123 +133,100 @@ function handleGesture(eventType: OsEventTypeList | undefined): void {
 }
 
 async function restoreCount(): Promise<void> {
-  const fromBridge = await readBridgeCount()
-  const fromBrowser = readBrowserCount()
-  const restored = newerCount(fromBridge, fromBrowser)
-  if (!restored) {
+  const bridgeRead = await readBridgeCount()
+  if (!bridgeRead.ok) {
+    count = readBrowserCount() ?? 0
+    console.log(`[g2demo] bridge read failed; count=${count} from localStorage, bridge left untouched`)
+    return
+  }
+
+  bridgeReady = true
+  if (bridgeRead.count !== null) {
+    count = bridgeRead.count
+    writeBrowserCount(count)
+    console.log(`[g2demo] restored count=${count} from bridge`)
+    return
+  }
+
+  const saved = readBrowserCount()
+  if (saved === null) {
     console.log('[g2demo] no stored count; starting at 0')
     return
   }
 
-  count = restored.count
-  revision = restored.revision
-  const source = restored === fromBridge ? 'bridge' : 'localStorage'
-  console.log(`[g2demo] restored count=${count} revision=${revision} from ${source}`)
-
-  if (!sameCount(fromBrowser, restored)) writeBrowserCount(restored)
-  if (!sameCount(fromBridge, restored)) writeBridgeCount(restored)
+  // The read succeeded and the key was empty, so this does not replace an unread value.
+  count = saved
+  console.log(`[g2demo] restored count=${count} from localStorage`)
+  saveCount(count)
 }
 
-function saveCount(stored: StoredCount): void {
-  writeBrowserCount(stored)
-  writeBridgeCount(stored)
+function saveCount(value: number): void {
+  writeBrowserCount(value)
+  if (!bridgeReady) return
+  pendingBridgeCount = value
+  bridgeWrite = bridgeWrite.then(flushBridgeCount)
 }
 
-function newerCount(fromBridge: StoredCount | null, fromBrowser: StoredCount | null): StoredCount | null {
-  if (!fromBridge) return fromBrowser
-  if (!fromBrowser) return fromBridge
-  return fromBrowser.revision > fromBridge.revision ? fromBrowser : fromBridge
-}
-
-function sameCount(left: StoredCount | null, right: StoredCount | null): boolean {
-  if (!left || !right) return false
-  return left.count === right.count && left.revision === right.revision
-}
-
-function parseStoredCount(raw: unknown): StoredCount | null {
-  if (typeof raw !== 'string') return null
-  const match = /^(\d+):(\d+)$/.exec(raw.trim())
-  if (!match) return null
-  const storedCount = Number(match[1])
-  const storedRevision = Number(match[2])
-  if (!Number.isSafeInteger(storedCount) || !Number.isSafeInteger(storedRevision)) return null
-  return { count: storedCount, revision: storedRevision }
-}
-
-function formatStoredCount(stored: StoredCount): string {
-  return `${stored.count}:${stored.revision}`
-}
-
-async function readBridgeCount(): Promise<StoredCount | null> {
-  try {
-    const raw = await withTimeout(bridge.getLocalStorage(COUNT_STORAGE_KEY), STORAGE_TIMEOUT_MS)
-    return parseStoredCount(raw)
-  } catch (error) {
-    warnOnce('bridge-read', '[g2demo] bridge storage read failed', error)
-    return null
-  }
-}
-
-function writeBridgeCount(stored: StoredCount): void {
-  const payload = formatStoredCount(stored)
-  bridgeWriteChain = bridgeWriteChain.then(async () => {
+async function flushBridgeCount(): Promise<void> {
+  while (pendingBridgeCount !== null) {
+    const value = pendingBridgeCount
+    pendingBridgeCount = null
     try {
-      const ok = await withTimeout(
-        bridge.setLocalStorage(COUNT_STORAGE_KEY, payload),
-        STORAGE_TIMEOUT_MS,
-      )
-      if (ok !== true) {
-        warnOnce('bridge-write', '[g2demo] bridge storage write declined; localStorage fallback is in use')
-      }
+      const ok = await bridge.setLocalStorage(COUNT_KEY, String(value))
+      if (ok !== true) console.warn('[g2demo] bridge storage write declined')
     } catch (error) {
-      warnOnce('bridge-write', '[g2demo] bridge storage write failed; localStorage fallback is in use', error)
+      console.warn('[g2demo] bridge storage write failed', error)
     }
-  })
+  }
 }
 
-function readBrowserCount(): StoredCount | null {
+async function readBridgeCount(): Promise<BridgeRead> {
   try {
-    return parseStoredCount(localStorage.getItem(COUNT_STORAGE_KEY))
+    const raw = await withTimeout(bridge.getLocalStorage(COUNT_KEY), BRIDGE_READ_TIMEOUT_MS)
+    if (typeof raw !== 'string') {
+      console.warn('[g2demo] bridge storage read failed', raw)
+      return { ok: false }
+    }
+    return { ok: true, count: parseCount(raw) }
   } catch (error) {
-    warnOnce('browser-read', '[g2demo] localStorage read failed', error)
+    console.warn('[g2demo] bridge storage read failed', error)
+    return { ok: false }
+  }
+}
+
+function parseCount(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null
+  const value = Number(raw)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+function readBrowserCount(): number | null {
+  try {
+    const raw = localStorage.getItem(COUNT_KEY)
+    return raw === null ? null : parseCount(raw)
+  } catch (error) {
+    console.warn('[g2demo] localStorage read failed', error)
     return null
   }
 }
 
-function writeBrowserCount(stored: StoredCount): void {
+function writeBrowserCount(value: number): void {
   try {
-    localStorage.setItem(COUNT_STORAGE_KEY, formatStoredCount(stored))
+    localStorage.setItem(COUNT_KEY, String(value))
   } catch (error) {
-    warnOnce('browser-write', '[g2demo] localStorage write failed', error)
+    console.warn('[g2demo] localStorage write failed', error)
   }
-}
-
-function warnOnce(key: string, message: string, error?: unknown): void {
-  if (warned.has(key)) return
-  warned.add(key)
-  if (error === undefined) console.warn(message)
-  else console.warn(message, error)
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      reject(new Error(`storage timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-
+    const timer = setTimeout(() => reject(new Error(`storage read timed out after ${timeoutMs}ms`)), timeoutMs)
     promise.then(
       (value) => {
-        if (settled) return
-        settled = true
         clearTimeout(timer)
         resolve(value)
       },
       (error: unknown) => {
-        if (settled) return
-        settled = true
         clearTimeout(timer)
         reject(error instanceof Error ? error : new Error(String(error)))
       },
